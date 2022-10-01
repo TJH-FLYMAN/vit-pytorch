@@ -10,7 +10,7 @@ def pair(t):
     return t if isinstance(t, tuple) else (t, t)
 
 # classes
-
+# layerNorm层  论文中的 add&Norm
 class PreNorm(nn.Module):
     def __init__(self, dim, fn):
         super().__init__()
@@ -18,7 +18,7 @@ class PreNorm(nn.Module):
         self.fn = fn
     def forward(self, x, **kwargs):
         return self.fn(self.norm(x), **kwargs)
-
+#FFN结构 线性层
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout = 0.):
         super().__init__()
@@ -31,7 +31,9 @@ class FeedForward(nn.Module):
         )
     def forward(self, x):
         return self.net(x)
-
+# 多头注意力
+# multi-head是注意力机制的堆叠
+# dim 输入token的dim
 class Attention(nn.Module):
     def __init__(self, dim, heads = 8, dim_head = 64, dropout = 0.):
         super().__init__()
@@ -52,16 +54,21 @@ class Attention(nn.Module):
         ) if project_out else nn.Identity()
 
     def forward(self, x):
+        #在指定维度分割张量
+        #  [B,num_patches+1, 3 * embedding_dim] ->[B,num_patches+1,embedding_dim]
         qkv = self.to_qkv(x).chunk(3, dim = -1)
+        # 拆成多头
+        # [B,num_patches+1,embedding_dim] ->  [B,num_patches+1,num_heads ,embedding_dim_per_head]  ->[B,num_heads,num_patches+1 ,embedding_dim_per_head]
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), qkv)
-
+        # q和k的转置 ，乘以缩放系数
         dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
 
         attn = self.attend(dots)
         attn = self.dropout(attn)
-
-        out = torch.matmul(attn, v)
-        out = rearrange(out, 'b h n d -> b n (h d)')
+        # 经过softmax后与v相乘
+        out = torch.matmul(attn, v)  
+        # 不同头的输出向量拼接，还原成  [B,num_patches+1,embedding_dim]
+        out = rearrange(out, 'b h n d -> b n (h d)') 
         return self.to_out(out)
 
 class Transformer(nn.Module):
@@ -74,6 +81,7 @@ class Transformer(nn.Module):
                 PreNorm(dim, FeedForward(dim, mlp_dim, dropout = dropout))
             ]))
     def forward(self, x):
+        # 加上残差
         for attn, ff in self.layers:
             x = attn(x) + x
             x = ff(x) + x
@@ -90,7 +98,8 @@ class ViT(nn.Module):
         num_patches = (image_height // patch_height) * (image_width // patch_width)
         patch_dim = channels * patch_height * patch_width
         assert pool in {'cls', 'mean'}, 'pool type must be either cls (cls token) or mean (mean pooling)'
-
+        
+        # [batch_size,channel,h,w] ->flatten->[batch_size,channel,h * w] ->transpose -> [batch_size,h * w,channel]
         self.to_patch_embedding = nn.Sequential(
             Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1 = patch_height, p2 = patch_width),
             nn.Linear(patch_dim, dim),
@@ -111,17 +120,21 @@ class ViT(nn.Module):
         )
 
     def forward(self, img):
+        # [bath,channel,h,w] -> [B,num_patches,embedding_dim]
         x = self.to_patch_embedding(img)
         b, n, _ = x.shape
-
+        #[1,1,dim] -> [batchsize,1,dim]
         cls_tokens = repeat(self.cls_token, '1 1 d -> b 1 d', b = b)
+        #[B,num_patches,embedding_dim] ->[B,num_patches+1,embedding_dim]
         x = torch.cat((cls_tokens, x), dim=1)
+        #shape不变 [B,num_patches+1,embedding_dim]
         x += self.pos_embedding[:, :(n + 1)]
         x = self.dropout(x)
-
+        # encoder 堆叠
         x = self.transformer(x)
-
+        # 切片提取数据 torch.cat(cls_token)时放在第0维 
         x = x.mean(dim = 1) if self.pool == 'mean' else x[:, 0]
 
         x = self.to_latent(x)
         return self.mlp_head(x)
+
